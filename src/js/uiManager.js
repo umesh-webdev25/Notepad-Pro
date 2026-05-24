@@ -5,6 +5,7 @@ export class UIManager extends EventTarget {
     super();
     this.elements = elements;
     this.modalResolver = null;
+    this.recoveryById = new Map();
     this.bind();
   }
 
@@ -12,7 +13,9 @@ export class UIManager extends EventTarget {
     document.addEventListener('click', (event) => {
       const actionTarget = event.target.closest('[data-action]');
       if (actionTarget) {
-        event.preventDefault();
+        if (actionTarget.tagName !== 'INPUT' && actionTarget.tagName !== 'SELECT') {
+          event.preventDefault();
+        }
         this.emitAction(actionTarget.dataset.action);
         this.closeMenus();
         return;
@@ -93,12 +96,32 @@ export class UIManager extends EventTarget {
     });
 
     this.elements.modalCancel.addEventListener('click', () => this.resolveModal('cancel'));
-    this.elements.modalSecondary.addEventListener('click', () => this.resolveModal('discard'));
-    this.elements.modalPrimary.addEventListener('click', () => this.resolveModal('save'));
+    this.elements.modalSecondary.addEventListener('click', () => this.resolveModal('secondary'));
+    this.elements.modalPrimary.addEventListener('click', () => this.resolveModal('primary'));
 
     document.addEventListener('keydown', (event) => {
-      if (!this.elements.modalBackdrop.hidden && event.key === 'Escape') {
-        this.resolveModal('cancel');
+      if (!this.elements.modalBackdrop.hidden) {
+        if (event.key === 'Escape') {
+          this.resolveModal('cancel');
+        } else if (event.key === 'Tab') {
+          const focusableElements = this.elements.modalBackdrop.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          const focusable = Array.from(focusableElements).filter(el => !el.hidden && !el.disabled && el.offsetParent !== null);
+          if (focusable.length > 0) {
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey) {
+              if (document.activeElement === first || !focusable.includes(document.activeElement)) {
+                last.focus();
+                event.preventDefault();
+              }
+            } else {
+              if (document.activeElement === last || !focusable.includes(document.activeElement)) {
+                first.focus();
+                event.preventDefault();
+              }
+            }
+          }
+        }
       }
     });
 
@@ -179,6 +202,51 @@ export class UIManager extends EventTarget {
     });
 
     this.elements.recentFiles.replaceChildren(fragment);
+  }
+
+  renderRecoveryFiles(files) {
+    if (!this.elements.recoveryFiles) return;
+
+    this.recoveryById.clear();
+
+    if (!files.length) {
+      const empty = createElement('li', { className: 'sidebar-hint', text: 'No recovery files found.' });
+      this.elements.recoveryFiles.replaceChildren(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    files
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .forEach((file) => {
+        if (!file?.id) return;
+        this.recoveryById.set(file.id, file);
+        const item = document.createElement('li');
+        const button = createElement('button', {
+          className: 'recent-file',
+          type: 'button',
+          ariaLabel: `Recover ${file.title || 'Untitled'}`
+        });
+        button.dataset.recoveryId = file.id;
+        const name = createElement('span', { className: 'recent-name', text: file.title || 'Untitled' });
+        const path = createElement('span', {
+          className: 'recent-path',
+          text: file.originalPath || 'Unsaved snapshot'
+        });
+        button.append(name, path);
+        item.appendChild(button);
+        fragment.appendChild(item);
+      });
+
+    this.elements.recoveryFiles.replaceChildren(fragment);
+  }
+
+  getRecoverySnapshot(id) {
+    return this.recoveryById.get(id) || null;
+  }
+
+  setFormattingEnabled(_enabled) {
+    // Plain/rich mode is enforced in EditorManager; no visual toolbar state change.
   }
 
   async confirmDirty(tab) {

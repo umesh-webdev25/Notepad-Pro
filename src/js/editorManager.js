@@ -1,74 +1,63 @@
-import { clamp, countWords } from './utils.js';
-import DOMPurify from 'dompurify';
+import { countWords } from './utils.js';
+import { isPlainExtension, sanitizePlainText, sanitizeRichHtml } from './sanitize.js';
 
-const ALLOWED_TAGS = ['b', 'i', 'u', 'strong', 'em', 'br', 'p', 'div', 'span', 'font'];
-const ALLOWED_ATTR = ['style', 'face', 'size', 'color'];
-const ALLOWED_STYLE_VAL = /^\d+(?:px|pt)$|^(?:left|center|right|justify)$|^(?:'[^']+'|"[^"]+"|[a-zA-Z0-9\s-]+)$/;
+const RICH_COMMANDS = new Set([
+  'bold', 'italic', 'underline', 'strikethrough',
+  'justifyLeft', 'justifyCenter', 'justifyRight',
+  'backColor', 'foreColor', 'fontName', 'fontSize', 'clear-format'
+]);
 
-// Configure DOMPurify hook for style validation
-DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
-  if (data.attrName === 'style') {
-    const styles = data.attrValue.split(';').map(s => s.trim()).filter(Boolean);
-    const validated = styles.filter(style => {
-      const [prop, val] = style.split(':').map(v => v.trim());
-      if (!prop || !val) return false;
-      if (prop === 'font-size') return /^\d+(?:px|pt)$/.test(val);
-      if (prop === 'text-align') return /^(?:left|center|right|justify)$/.test(val);
-      return true; // Allow other standard properties for now
-    });
-    data.attrValue = validated.join('; ');
-  }
-});
+const TAG_BY_COMMAND = {
+  bold: ['B', 'STRONG'],
+  italic: ['I', 'EM'],
+  underline: ['U'],
+  strikethrough: ['S', 'STRIKE']
+};
 
 export class EditorManager extends EventTarget {
   static async create({ container }) {
-    return new EditorManager({ container });
+    const instance = new EditorManager({ container });
+    instance.seedHistory();
+    return instance;
   }
 
   constructor({ container }) {
     super();
-    this.container = container;
-    this.editor = container; // The container itself is the contenteditable div
-    this.zoom = Number(localStorage.getItem('notepad.zoom') || 100);
+    this.editor = container;
     this.isPlainTextMode = false;
     this.lastRange = null;
+    this.history = [];
+    this.historyIndex = -1;
+    this.maxHistory = 100;
 
-    this.editor.style.fontSize = '12pt';
-    this.editor.style.lineHeight = '1.65';
-    this.editor.style.outline = 'none';
-    this.editor.style.whiteSpace = 'pre-wrap';
-    this.editor.style.wordBreak = 'break-word';
-    this.editor.style.padding = '22px';
+    Object.assign(this.editor.style, {
+      fontSize: '12pt',
+      lineHeight: '1.65',
+      outline: 'none',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      padding: '22px'
+    });
 
     this.bind();
   }
 
-  get fontSize() {
-    return Math.round(15 * (this.zoom / 100));
-  }
-
   bind() {
     this.editor.addEventListener('input', () => {
-      this.dispatchEvent(new CustomEvent('change', { detail: { content: this.getValue(this.isPlainTextMode) } }));
+      this.pushHistory();
+      this.dispatchEvent(new CustomEvent('change', {
+        detail: { content: this.getValue(this.isPlainTextMode) }
+      }));
       this.emitCursor();
     });
 
-    document.addEventListener('selectionchange', () => {
-      if (document.activeElement === this.editor) {
-        this.emitCursor();
-      }
-    });
-
-    this.editor.addEventListener('focus', () => this.emitCursor());
-
-    // Selection caching
     const saveSelection = () => {
       const sel = window.getSelection();
       if (sel.rangeCount > 0 && this.editor.contains(sel.anchorNode)) {
         this.lastRange = sel.getRangeAt(0).cloneRange();
       }
     };
-    
+
     this.editor.addEventListener('blur', saveSelection);
     document.addEventListener('selectionchange', () => {
       if (document.activeElement === this.editor) {
@@ -76,19 +65,49 @@ export class EditorManager extends EventTarget {
         this.emitCursor();
       }
     });
+    this.editor.addEventListener('focus', () => this.emitCursor());
+  }
+
+  seedHistory() {
+    this.history = [this.getValue()];
+    this.historyIndex = 0;
+  }
+
+  pushHistory() {
+    const content = this.getValue();
+    if (this.history[this.historyIndex] === content) return;
+    this.history = this.history.slice(0, this.historyIndex + 1);
+    this.history.push(content);
+    if (this.history.length > this.maxHistory) {
+      this.history.shift();
+    } else {
+      this.historyIndex += 1;
+    }
+  }
+
+  undo() {
+    if (this.historyIndex <= 0) return;
+    this.historyIndex -= 1;
+    this.applyHistorySnapshot();
+  }
+
+  redo() {
+    if (this.historyIndex >= this.history.length - 1) return;
+    this.historyIndex += 1;
+    this.applyHistorySnapshot();
+  }
+
+  applyHistorySnapshot() {
+    const content = this.history[this.historyIndex];
+    const mode = this.isPlainTextMode ? 'plain' : 'rich';
+    this.setValue(content, { mode, bypassHistory: true });
   }
 
   restoreSelection() {
     if (!this.lastRange) return;
     const sel = window.getSelection();
-    if (!this.editor.contains(sel.anchorNode)) {
-      sel.removeAllRanges();
-      sel.addRange(this.lastRange);
-    }
-  }
-
-  emitCursor() {
-    this.dispatchEvent(new CustomEvent('cursor', { detail: this.getCursorPosition() }));
+    sel.removeAllRanges();
+    sel.addRange(this.lastRange);
   }
 
   focus() {
@@ -96,50 +115,37 @@ export class EditorManager extends EventTarget {
   }
 
   getValue(isPlainText = this.isPlainTextMode) {
-    // innerText is better for plain text as it preserves line breaks 
-    // and doesn't include HTML entities like &lt;
     return isPlainText ? this.editor.innerText : this.editor.innerHTML;
   }
 
   setValue(content, metadata = {}) {
     this.lastRange = null;
-    const ext = (metadata.filePath || metadata.title || '').split('.').pop()?.toLowerCase();
-    
-    // Plan: .txt and .md are plain text. No extension or .html is rich text.
-    this.isPlainTextMode = metadata.mode === 'plain' || ext === 'txt' || ext === 'md';
-    const isRich = !this.isPlainTextMode;
+    const extPlain = isPlainExtension(metadata.filePath || metadata.title || '');
+    this.isPlainTextMode = metadata.mode === 'plain' || metadata.mode === 'rich'
+      ? metadata.mode === 'plain'
+      : extPlain;
 
-    if (isRich) {
-      const clean = DOMPurify.sanitize(content || '', { 
-        ALLOWED_TAGS,
-        ALLOWED_ATTR,
-        ALLOWED_STYLES: ['font-size', 'font-family', 'text-align', 'color', 'background-color']
-      });
-      this.editor.innerHTML = clean;
+    if (this.isPlainTextMode) {
+      this.editor.innerText = sanitizePlainText(content || '');
     } else {
-      // For plain text, we set innerText.
-      // AUTO-REPAIR: If the content looks like double-encoded HTML (common corruption from previous versions),
-      // we decode it and strip tags to restore the intended plain text.
-      let finalContent = content || '';
-      if (finalContent.includes('&lt;') && finalContent.includes('&gt;')) {
-        const temp = document.createElement('div');
-        temp.innerHTML = finalContent; // First level decode (&lt; -> <)
-        const decoded = temp.textContent; 
-        if (decoded.includes('<') && decoded.includes('>')) {
-          temp.innerHTML = DOMPurify.sanitize(decoded); // Second level: parse tags
-          finalContent = temp.innerText; // Strip tags
-        }
-      }
-      this.editor.innerText = finalContent;
+      this.editor.innerHTML = sanitizeRichHtml(content || '');
     }
+
+    if (!metadata.bypassHistory) {
+      this.pushHistory();
+    }
+
     this.emitCursor();
-    this.dispatchEvent(new CustomEvent('change', { detail: { content: this.getValue(this.isPlainTextMode) } }));
+    this.dispatchEvent(new CustomEvent('change', {
+      detail: { content: this.getValue(this.isPlainTextMode) }
+    }));
+    this.dispatchEvent(new CustomEvent('modechange', { detail: { isPlainTextMode: this.isPlainTextMode } }));
   }
 
   toggleMode() {
-    this.isPlainTextMode = !this.isPlainTextMode;
-    const content = this.getValue(!this.isPlainTextMode); // Get current
-    this.setValue(content, { mode: this.isPlainTextMode ? 'plain' : 'rich' });
+    const nextPlain = !this.isPlainTextMode;
+    const content = this.getValue(!nextPlain);
+    this.setValue(content, { mode: nextPlain ? 'plain' : 'rich' });
     return this.isPlainTextMode;
   }
 
@@ -148,140 +154,220 @@ export class EditorManager extends EventTarget {
   }
 
   runEditCommand(command, value = null) {
+    if (this.isPlainTextMode && RICH_COMMANDS.has(command)) {
+      this.dispatchEvent(new CustomEvent('format-blocked', { detail: { command } }));
+      return;
+    }
+
     this.restoreSelection();
     this.focus();
-    document.execCommand('styleWithCSS', false, true);
 
-    const commands = {
-      undo: 'undo',
-      redo: 'redo',
-      cut: 'cut',
-      copy: 'copy',
-      paste: 'paste',
-      'select-all': 'selectAll',
-      bold: 'bold',
-      italic: 'italic',
-      underline: 'underline',
-      strikethrough: 'strikethrough',
-      justifyLeft: 'justifyLeft',
-      justifyCenter: 'justifyCenter',
-      justifyRight: 'justifyRight',
-      foreColor: 'foreColor',
-      backColor: 'backColor',
-      fontName: 'fontName'
-    };
+    if (command === 'undo') return this.undo();
+    if (command === 'redo') return this.redo();
 
-    if (command === 'fontSize') {
-      this.applyFontSize(value);
-    } else if (command === 'clear-format') {
-      this.clearFormatting();
-    } else {
-      const cmd = commands[command];
-      if (cmd) document.execCommand(cmd, false, value);
+    if (command === 'cut' || command === 'copy' || command === 'paste') {
+      this.runClipboard(command);
+      return;
     }
-    
+
+    if (command === 'select-all') {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(this.editor);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (!selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+
+    if (command === 'clear-format') {
+      this.clearFormatting(range);
+    } else if (TAG_BY_COMMAND[command]) {
+      this.toggleInlineFormat(command, range);
+    } else if (command.startsWith('justify')) {
+      const align = command.replace('justify', '').toLowerCase();
+      this.applyParagraphAlign(align, range);
+    } else if (command === 'backColor' || command === 'foreColor') {
+      const prop = command === 'backColor' ? 'backgroundColor' : 'color';
+      this.applyStyle(prop, value, range);
+    } else if (command === 'fontName') {
+      this.applyStyle('fontFamily', value, range);
+    } else if (command === 'fontSize') {
+      this.applyFontSize(value, range);
+    }
+
+    this.commitEdit();
+  }
+
+  runClipboard(command) {
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return;
+
+    try {
+      if (command === 'paste') {
+        document.execCommand('paste');
+        this.commitEdit();
+        return;
+      }
+      if (command === 'copy') {
+        document.execCommand('copy');
+        return;
+      }
+      if (command === 'cut') {
+        document.execCommand('cut');
+        this.commitEdit();
+      }
+    } catch {
+      const text = sel.toString();
+      if (command === 'copy' || command === 'cut') {
+        navigator.clipboard?.writeText(text).catch(() => {});
+      }
+      if (command === 'cut' && sel.rangeCount) {
+        sel.getRangeAt(0).deleteContents();
+        this.commitEdit();
+      }
+      if (command === 'paste') {
+        navigator.clipboard?.readText().then((clip) => {
+          if (!clip || !sel.rangeCount) return;
+          const range = sel.getRangeAt(0);
+          range.deleteContents();
+          range.insertNode(document.createTextNode(clip));
+          this.commitEdit();
+        }).catch(() => {});
+      }
+    }
+  }
+
+  commitEdit() {
     this.editor.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  applyFontSize(sizePt) {
-    this.restoreSelection();
-    const selection = window.getSelection();
-    if (!selection.rangeCount) return;
+  toggleInlineFormat(command, range) {
+    const tags = TAG_BY_COMMAND[command].map((t) => t.toLowerCase());
+    const tagName = tags[0];
 
-    const range = selection.getRangeAt(0);
-    
-    // Optimization: If the selection is exactly one span, just update its style
+    if (range.collapsed) {
+      this.applyStyle(
+        command === 'bold' ? 'fontWeight' : command === 'italic' ? 'fontStyle' : 'textDecoration',
+        command === 'bold' ? 'bold' : command === 'italic' ? 'italic' : command === 'underline' ? 'underline' : 'line-through',
+        range
+      );
+      return;
+    }
+
+    let node = range.commonAncestorContainer;
+    if (node.nodeType === 3) node = node.parentElement;
+    const wrapper = node?.closest(tags.join(','));
+
+    if (wrapper && this.editor.contains(wrapper) && wrapper.textContent === range.toString()) {
+      const parent = wrapper.parentNode;
+      while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
+      parent.removeChild(wrapper);
+      return;
+    }
+
+    const el = document.createElement(tagName);
+    el.appendChild(range.extractContents());
+    range.insertNode(el);
+    const sel = window.getSelection();
+    const newRange = document.createRange();
+    newRange.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+  }
+
+  applyStyle(prop, value, range) {
+    const selection = window.getSelection();
+
+    if (range.collapsed) {
+      const span = document.createElement('span');
+      span.style[prop] = value;
+      span.appendChild(document.createTextNode('\u200B'));
+      range.insertNode(span);
+      const newRange = document.createRange();
+      newRange.setStart(span.firstChild, 1);
+      newRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+      return;
+    }
+
     let container = range.commonAncestorContainer;
     if (container.nodeType === 3) container = container.parentElement;
 
-    if (container.tagName === 'SPAN' && 
-        container.parentElement === this.editor && 
+    if (container !== this.editor &&
+        container.tagName === 'SPAN' &&
         selection.toString() === container.textContent) {
-      container.style.fontSize = `${sizePt}pt`;
-    } else {
-      // Standard application
-      document.execCommand('styleWithCSS', false, true);
-      document.execCommand('fontSize', false, '7'); // Identity size
-      
-      const fontTags = this.editor.querySelectorAll('font[size="7"], span[style*="xxx-large"]');
-      fontTags.forEach(el => {
-        const span = document.createElement('span');
-        span.style.fontSize = `${sizePt}pt`;
-        if (el.style.fontFamily) span.style.fontFamily = el.style.fontFamily;
-        if (el.style.color) span.style.color = el.style.color;
-        
-        // Transfer children
-        while (el.firstChild) span.appendChild(el.firstChild);
-        el.parentElement.replaceChild(span, el);
-      });
+      container.style[prop] = value;
+      return;
     }
+
+    const span = document.createElement('span');
+    span.style[prop] = value;
+    span.appendChild(range.extractContents());
+    range.insertNode(span);
+    const newRange = document.createRange();
+    newRange.selectNodeContents(span);
+    selection.removeAllRanges();
+    selection.addRange(newRange);
   }
 
-  clearFormatting() {
-    this.focus();
-    document.execCommand('removeFormat', false, null);
-    
-    // Manually strip all style attributes from any elements inside the selection
+  applyFontSize(sizePt, range = null) {
     const selection = window.getSelection();
     if (!selection.rangeCount) return;
-    
-    const range = selection.getRangeAt(0);
-    const container = range.commonAncestorContainer;
-    const elements = container.nodeType === 1 ? [container] : [];
-    
-    // Get all elements within the range
+    const activeRange = range || selection.getRangeAt(0);
+    this.applyStyle('fontSize', `${sizePt}pt`, activeRange);
+  }
+
+  applyParagraphAlign(align, range) {
+    let node = range.commonAncestorContainer;
+    if (node.nodeType === 3) node = node.parentElement;
+    let block = node.closest('p, div');
+    if (!block || block === this.editor || !this.editor.contains(block)) {
+      block = this.editor;
+    }
+    block.style.textAlign = align;
+  }
+
+  clearFormatting(range) {
+    const selection = window.getSelection();
+    const root = range.commonAncestorContainer.nodeType === 1
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+
     const walker = document.createTreeWalker(
-      container.nodeType === 1 ? container : container.parentElement,
+      root,
       NodeFilter.SHOW_ELEMENT,
       {
-        acceptNode: (node) => {
-          return selection.containsNode(node, true) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-        }
+        acceptNode: (node) => (
+          selection.containsNode(node, true) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+        )
       }
     );
 
-    let node;
-    while (node = walker.nextNode()) {
-      node.removeAttribute('style');
-    }
-    
-    // Also check the container itself if it's the only thing
-    if (container.nodeType === 1 && selection.containsNode(container, true)) {
-      container.removeAttribute('style');
-    }
-  }
-
-  setFontFamily(family) {
-    this.runEditCommand('fontName', family);
-  }
-
-  setFontSize(size) {
-    this.runEditCommand('fontSize', size);
-  }
-
-  stepFontSize(delta) {
-    const sizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 72];
-    const state = this.getSelectionState();
-    let currentSize = parseFloat(state.fontSize) || 12;
-
-    let index = sizes.findIndex(s => s >= currentSize);
-    if (index === -1) index = sizes.length - 1;
-
-    let nextIndex;
-    if (delta > 0) {
-      nextIndex = (sizes[index] > currentSize) ? index : index + 1;
-    } else {
-      nextIndex = index - 1;
+    const toUnwrap = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n !== this.editor) toUnwrap.push(n);
+      n.removeAttribute('style');
     }
 
-    const next = sizes[Math.max(0, Math.min(sizes.length - 1, nextIndex))];
-    this.setFontSize(next);
-    this.dispatchEvent(new CustomEvent('zoom', { detail: { size: next } }));
+    toUnwrap.forEach((el) => {
+      if (['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'SPAN', 'FONT'].includes(el.tagName)) {
+        const parent = el.parentNode;
+        while (el.firstChild) parent.insertBefore(el.firstChild, el);
+        parent.removeChild(el);
+      }
+    });
   }
 
   getStats() {
     const selection = window.getSelection();
-    let line = 1, column = 1;
+    let line = 1;
+    let column = 1;
 
     if (selection.rangeCount > 0) {
       try {
@@ -289,65 +375,59 @@ export class EditorManager extends EventTarget {
         const preCaretRange = range.cloneRange();
         preCaretRange.selectNodeContents(this.editor);
         preCaretRange.setEnd(range.endContainer, range.endOffset);
-        
         const textBefore = preCaretRange.toString();
         const lines = textBefore.split('\n');
         line = lines.length;
         column = lines[lines.length - 1].length + 1;
-      } catch (e) {
-        // Fallback for complex ranges
+      } catch {
+        // ignore range errors
       }
     }
 
     const text = this.editor.innerText || '';
-    const state = this.getSelectionState();
-    const currentPt = parseFloat(state.fontSize) || 12;
-    const zoom = Math.round((currentPt / 12) * 100);
+    const zoom = Math.round((window.notepad?.window?.getZoom?.() || 1) * 100);
 
     return {
       cursor: { line, column },
       words: countWords(text),
       chars: text.length,
-      zoom: zoom
+      zoom,
+      isPlainTextMode: this.isPlainTextMode
     };
   }
 
   getSelectionState() {
     const selection = window.getSelection();
-    if (!selection.rangeCount) return { bold: false, italic: false, underline: false, fontSize: '12pt', fontFamily: 'Arial' };
+    if (!selection.rangeCount) {
+      return {
+        bold: false, italic: false, underline: false, strikethrough: false,
+        fontSize: '12pt', fontFamily: 'Roboto', align: 'left', backColor: 'transparent'
+      };
+    }
 
     const node = selection.focusNode.nodeType === 1 ? selection.focusNode : selection.focusNode.parentElement;
     const computed = window.getComputedStyle(node);
-    const size = computed.fontSize;
-    const family = computed.fontFamily.split(',')[0].replace(/['"]/g, '');
+    const block = node.closest('p, div') || this.editor;
 
     return {
-      bold: document.queryCommandState('bold'),
-      italic: document.queryCommandState('italic'),
-      underline: document.queryCommandState('underline'),
-      strikethrough: document.queryCommandState('strikethrough'),
-      fontSize: size.includes('px') ? `${Math.round(parseFloat(size) * 0.75)}pt` : size,
-      fontFamily: family,
-      align: document.queryCommandValue('justifyLeft') === 'true' ? 'left' :
-             document.queryCommandValue('justifyCenter') === 'true' ? 'center' :
-             document.queryCommandValue('justifyRight') === 'true' ? 'right' : 'left'
+      bold: computed.fontWeight === 'bold' || parseInt(computed.fontWeight, 10) >= 700 || !!node.closest('b, strong'),
+      italic: computed.fontStyle === 'italic' || !!node.closest('i, em'),
+      underline: computed.textDecorationLine.includes('underline') || !!node.closest('u'),
+      strikethrough: computed.textDecorationLine.includes('line-through') || !!node.closest('s, strike'),
+      fontSize: computed.fontSize.includes('px')
+        ? `${Math.round(parseFloat(computed.fontSize) * 0.75)}pt`
+        : computed.fontSize,
+      fontFamily: computed.fontFamily.split(',')[0].replace(/['"]/g, '').trim(),
+      align: window.getComputedStyle(block).textAlign || 'left',
+      backColor: computed.backgroundColor
     };
+  }
+
+  emitCursor() {
+    this.dispatchEvent(new CustomEvent('cursor', { detail: this.getStats() }));
   }
 
   getCursorPosition() {
     return this.getStats();
-  }
-
-  // Search and replace are handled by SearchManager.js using non-destructive TreeWalker
-  selectRange(start, end) {
-    // No-op for now
-  }
-
-  setHighlights(matches, currentIndex = -1) {
-    // No-op to prevent corrupting HTML
-  }
-
-  clearHighlights() {
-    // No-op
   }
 }

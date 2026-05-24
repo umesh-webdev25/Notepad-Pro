@@ -1,7 +1,9 @@
 import { createElement, debounce, generateId, getFileName, safeText } from './utils.js';
-import DOMPurify from 'dompurify';
+import { sanitizePlainText, sanitizeRichHtml, isPlainExtension } from './sanitize.js';
 
-const SESSION_KEY = 'notepad.session.v2';
+const SESSION_KEY = 'notepad.session.v3';
+const MAX_SESSION_BYTES = 4 * 1024 * 1024;
+const MAX_TABS = 24;
 
 export class TabsManager extends EventTarget {
   constructor({ container, editor, fileManager, toasts }) {
@@ -13,7 +15,7 @@ export class TabsManager extends EventTarget {
     this.tabs = [];
     this.activeId = null;
     this.persistSession = debounce(() => this.saveSession(), 180);
-    this.persistRecovery = debounce((tab) => this.fileManager.saveRecovery(tab), 30000);
+    this.persistRecovery = debounce((tab) => this.fileManager.saveRecovery(tab), 5000);
     this.bind();
   }
 
@@ -35,21 +37,26 @@ export class TabsManager extends EventTarget {
     return this.tabs.find((tab) => tab.id === this.activeId) || null;
   }
 
+  sanitizeTabContent(content, filePath) {
+    return isPlainExtension(filePath) ? sanitizePlainText(content) : sanitizeRichHtml(content);
+  }
+
   restoreSession() {
     const raw = localStorage.getItem(SESSION_KEY);
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        this.tabs = Array.isArray(parsed.tabs) ? parsed.tabs.map((tab) => {
-          // Content is already sanitized before saving. Direct restore is safe.
-          const content = tab.content || '';
+        this.tabs = Array.isArray(parsed.tabs) ? parsed.tabs.slice(0, MAX_TABS).map((tab) => {
+          const filePath = tab.filePath || null;
+          const content = this.sanitizeTabContent(tab.content || '', filePath);
+          const savedContent = this.sanitizeTabContent(tab.savedContent || '', filePath);
           return {
             id: tab.id || generateId(),
             title: safeText(tab.title, 200) || 'Untitled',
-            filePath: tab.filePath || null,
+            filePath,
             content,
-            savedContent: safeText(tab.savedContent),
-            isDirty: Boolean(tab.isDirty) && content !== '',
+            savedContent,
+            isDirty: Boolean(tab.isDirty) && content !== savedContent,
             createdAt: tab.createdAt || Date.now(),
             updatedAt: tab.updatedAt || Date.now()
           };
@@ -68,19 +75,37 @@ export class TabsManager extends EventTarget {
   }
 
   saveSession() {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({
+    const payload = {
       activeId: this.activeId,
-      tabs: this.tabs
-    }));
+      tabs: this.tabs.slice(0, MAX_TABS).map((tab) => ({
+        ...tab,
+        content: safeText(tab.content, 512 * 1024),
+        savedContent: safeText(tab.savedContent, 512 * 1024)
+      }))
+    };
+
+    let serialized = JSON.stringify(payload);
+    while (serialized.length > MAX_SESSION_BYTES && payload.tabs.length > 1) {
+      payload.tabs.pop();
+      serialized = JSON.stringify(payload);
+    }
+
+    try {
+      localStorage.setItem(SESSION_KEY, serialized);
+    } catch {
+      this.toasts?.warning('Session not saved', 'Storage quota exceeded. Close some tabs.');
+    }
   }
 
   createTab(content = '', options = {}) {
+    const filePath = options.filePath || null;
+    const safeContent = this.sanitizeTabContent(content, filePath);
     const tab = {
       id: generateId(),
       title: options.title || 'Untitled',
-      filePath: options.filePath || null,
-      content: safeText(content),
-      savedContent: safeText(options.savedContent ?? content),
+      filePath,
+      content: safeContent,
+      savedContent: this.sanitizeTabContent(options.savedContent ?? content, filePath),
       isDirty: Boolean(options.isDirty),
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -123,6 +148,19 @@ export class TabsManager extends EventTarget {
     this.editor.focus();
   }
 
+  updateActiveTab(updates = {}) {
+    const tab = this.activeTab;
+    if (!tab) return;
+    Object.assign(tab, updates);
+    if (updates.content !== undefined) {
+      tab.isDirty = tab.content !== tab.savedContent;
+    }
+    tab.updatedAt = Date.now();
+    this.render();
+    this.saveSession();
+    this.emitUpdate();
+  }
+
   markSaved(tab, filePath, name) {
     tab.filePath = filePath;
     tab.title = name || getFileName(filePath);
@@ -133,6 +171,13 @@ export class TabsManager extends EventTarget {
     this.render();
     this.saveSession();
     this.emitUpdate();
+  }
+
+  async flushRecovery() {
+    const tab = this.activeTab;
+    if (tab?.isDirty) {
+      await this.fileManager.saveRecovery(tab, this.editor.isPlainTextMode);
+    }
   }
 
   async closeTab(id, confirmClose) {
@@ -195,11 +240,15 @@ export class TabsManager extends EventTarget {
       button.tabIndex = 0;
       button.setAttribute('aria-selected', String(tab.id === this.activeId));
 
-      const title = createElement('span', { className: 'tab-title', text: tab.title });
-      button.appendChild(title);
+      button.appendChild(createElement('span', { className: 'tab-title', text: tab.title }));
       if (tab.isDirty) button.appendChild(createElement('span', { className: 'dirty-dot' }));
 
-      const close = createElement('button', { className: 'tab-close', text: 'x', type: 'button', ariaLabel: `Close ${tab.title}` });
+      const close = createElement('button', {
+        className: 'tab-close',
+        text: 'x',
+        type: 'button',
+        ariaLabel: `Close ${tab.title}`
+      });
       close.dataset.closeTab = tab.id;
       button.appendChild(close);
       fragment.appendChild(button);

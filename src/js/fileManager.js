@@ -43,14 +43,16 @@ export class FileManager {
     return result;
   }
 
-  async saveRecovery(tab) {
+  async saveRecovery(tab, isPlainText = false) {
     if (!tab?.isDirty) return;
     try {
       await this.api.recovery.save({
         id: tab.id,
         title: tab.title,
         filePath: tab.filePath,
-        content: tab.content
+        content: tab.content,
+        isPlainText,
+        savedContent: tab.savedContent || ''
       });
     } catch (error) {
       this.toasts.warning('Recovery snapshot failed', formatError(error));
@@ -61,7 +63,7 @@ export class FileManager {
     try {
       await this.api.recovery.delete(tabId);
     } catch {
-      // Recovery cleanup should never interrupt the user's save flow.
+      // non-blocking
     }
   }
 }

@@ -171,11 +171,37 @@ function registerIpcHandlers() {
     else win.maximize();
   });
 
+  ipcMain.on('window:zoom-in', (event) => {
+    const win = getSenderWindow(event);
+    if (!win) return;
+    const current = win.webContents.zoomFactor;
+    win.webContents.zoomFactor = Math.min(3.0, current + 0.1);
+  });
+
+  ipcMain.on('window:zoom-out', (event) => {
+    const win = getSenderWindow(event);
+    if (!win) return;
+    const current = win.webContents.zoomFactor;
+    win.webContents.zoomFactor = Math.max(0.5, current - 0.1);
+  });
+
+  ipcMain.on('window:reset-zoom', (event) => {
+    const win = getSenderWindow(event);
+    if (!win) return;
+    win.webContents.zoomFactor = 1.0;
+  });
+
   ipcMain.on('window:force-close', (event) => {
     const win = getSenderWindow(event);
     if (!win) return;
     isForceClosing = true;
     win.close();
+  });
+
+  ipcMain.on('window:request-close', (event) => {
+    const win = getSenderWindow(event) || mainWindow;
+    if (!win || win.webContents.isDestroyed()) return;
+    win.webContents.send('app:request-close');
   });
 
   ipcMain.handle('app:info', () => ({
@@ -252,6 +278,21 @@ function registerIpcHandlers() {
     return { ok: true, filePath, name: path.basename(filePath), savedAt: Date.now() };
   });
 
+  ipcMain.handle('recovery:list', async () => {
+    try {
+      const files = await fs.readdir(getStorePaths().recoveryDir);
+      const items = await Promise.all(
+        files.map(async f => {
+          if (!f.endsWith('.json')) return null;
+          return await readJson(path.join(getStorePaths().recoveryDir, f), null);
+        })
+      );
+      return { ok: true, files: items.filter(Boolean) };
+    } catch {
+      return { ok: true, files: [] };
+    }
+  });
+
   ipcMain.handle('recovery:save', async (event, payload) => {
     const id = sanitizeRecoveryId(payload?.id);
     const content = typeof payload?.content === 'string' ? payload.content : '';
@@ -266,6 +307,8 @@ function registerIpcHandlers() {
       title: String(payload?.title || 'Untitled').slice(0, 200),
       originalPath: typeof payload?.filePath === 'string' ? payload.filePath : null,
       content,
+      savedContent: typeof payload?.savedContent === 'string' ? payload.savedContent.slice(0, MAX_RECOVERY_BYTES) : '',
+      isPlainText: Boolean(payload?.isPlainText),
       updatedAt: Date.now()
     });
     return { ok: true };

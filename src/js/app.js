@@ -6,7 +6,7 @@ import { TabsManager } from './tabsManager.js';
 import { ToastManager } from './toastManager.js';
 import { UIManager } from './uiManager.js';
 import { ThemeManager } from './themeManager.js';
-import { $, formatError } from './utils.js';
+import { $, debounce, formatError } from './utils.js';
 
 const elements = {
   tabs: $('#tabs-container'),
@@ -15,6 +15,7 @@ const elements = {
   sidebar: $('#sidebar'),
   sidebarResizer: $('#sidebar-resizer'),
   recentFiles: $('#recent-files-list'),
+  recoveryFiles: $('#recovery-files-list'),
   findBar: $('#find-bar'),
   findInput: $('#find-input'),
   matchCase: $('#match-case-checkbox'),
@@ -69,6 +70,17 @@ async function refreshRecentFiles() {
   }
 }
 
+async function refreshRecoveryFiles() {
+  try {
+    const response = await window.notepad.recovery.list();
+    if (response?.ok) {
+      ui.renderRecoveryFiles(response.files);
+    }
+  } catch (error) {
+    toasts.warning('Recovery files unavailable', formatError(error));
+  }
+}
+
 async function openFile() {
   try {
     const file = await fileManager.openDialog();
@@ -99,44 +111,32 @@ async function openRecent(filePath) {
 async function saveActive(saveAs = false) {
   const tab = tabs.activeTab;
   if (!tab) return false;
-  
+
   try {
-    let targetPath = tab.filePath;
-    if (saveAs || !targetPath) {
+    const extFromPath = tab.filePath?.split('.').pop()?.toLowerCase();
+    const isPlainText = editor.isPlainTextMode || extFromPath === 'txt' || extFromPath === 'md';
+    tab.content = editor.getValue(isPlainText);
+
+    if (saveAs || !tab.filePath) {
       let suggested = tab.title === 'Untitled' ? '' : tab.title;
       if (!suggested || suggested === 'Untitled') {
-        const text = editor.getPlainText();
-        const firstLine = text.split('\n')[0].trim();
-        if (firstLine) {
-          suggested = firstLine.slice(0, 35).replace(/[<>:"/\\|?*]/g, '').trim();
-        }
+        const firstLine = editor.getPlainText().split('\n')[0].trim();
+        if (firstLine) suggested = firstLine.slice(0, 35).replace(/[<>:"/\\|?*]/g, '').trim();
       }
       if (!suggested) suggested = 'Untitled';
-      if (!suggested.includes('.')) suggested += (editor.isPlainTextMode ? '.txt' : '.html');
+      if (!suggested.includes('.')) suggested += isPlainText ? '.txt' : '.html';
 
-      const result = await fileManager.save({ ...tab, filePath: suggested }, true);
-      if (!result || result.canceled) return false;
-      targetPath = result.filePath;
-      tab.title = result.name;
+      const pick = await fileManager.save({ ...tab, filePath: suggested }, true);
+      if (!pick || pick.canceled) return false;
+      tab.filePath = pick.filePath;
+      tab.title = pick.name;
     }
 
-    const ext = targetPath.split('.').pop()?.toLowerCase();
-    const isPlainText = ext === 'txt' || ext === 'md' || editor.isPlainTextMode;
-    
-    // Get content in correct format
-    tab.content = editor.getValue(isPlainText);
-    tab.filePath = targetPath;
+    const result = await fileManager.save(tab, false);
+    if (!result) return false;
 
-    // Perform actual write
-    const finalResult = await fileManager.save(tab, false);
-    if (!finalResult) return false;
-
-    tabs.markSaved(tab, finalResult.filePath, finalResult.name);
-    
-    // Sync editor mode without resetting content if possible, 
-    // or just update the internal flag.
     editor.isPlainTextMode = isPlainText;
-
+    tabs.markSaved(tab, result.filePath, result.name);
     await refreshRecentFiles();
     return true;
   } catch (error) {
@@ -147,12 +147,11 @@ async function saveActive(saveAs = false) {
 
 async function confirmTabClose(tab) {
   const decision = await ui.confirmDirty(tab);
-  if (decision === 'save') {
+  if (decision === 'primary' || decision === 'save') {
     const saved = await saveActive(false);
-    if (!saved) return 'cancel';
-    return 'discard';
+    return saved ? 'close' : 'cancel';
   }
-  return decision;
+  return decision === 'secondary' || decision === 'discard' ? 'close' : decision;
 }
 
 async function closeActiveTab() {
@@ -164,6 +163,10 @@ async function closeActiveTab() {
 async function exitApp() {
   const ok = await tabs.closeAll(confirmTabClose);
   if (ok) window.notepad.window.forceClose();
+}
+
+function syncFormattingToolbar() {
+  ui.setFormattingEnabled(!editor.isPlainTextMode);
 }
 
 function runAction(action) {
@@ -182,9 +185,15 @@ function runAction(action) {
         primary: 'Clear',
         cancel: 'Cancel'
       });
-      if (resetConfirmed === 'save') {
-        editor.setContent('');
-        tabs.updateActiveTab({ content: '' });
+      if (resetConfirmed === 'primary' || resetConfirmed === 'save') {
+        const tab = tabs.activeTab;
+        editor.setValue('', tab || {});
+        if (tab) {
+          tabs.updateActiveTab({
+            content: editor.getValue(),
+            isDirty: editor.getValue() !== tab.savedContent
+          });
+        }
       }
     },
     'clear-history': async () => {
@@ -194,7 +203,7 @@ function runAction(action) {
         primary: 'Clear',
         cancel: 'Cancel'
       });
-      if (historyConfirmed === 'save') {
+      if (historyConfirmed === 'primary' || historyConfirmed === 'save') {
         await fileManager.clearRecent();
         await refreshRecentFiles();
       }
@@ -217,23 +226,28 @@ function runAction(action) {
     'find-close': () => search.close(),
     replace: () => search.replace($('#replace-input').value),
     'replace-all': () => search.replaceAll($('#replace-input').value),
-    'zoom-in': () => editor.stepFontSize(1),
-    'zoom-out': () => editor.stepFontSize(-1),
-    'minimize': () => window.electronAPI.send('window:minimize'),
-    'maximize': () => window.electronAPI.send('window:maximize'),
+    'zoom-in': () => { window.notepad.window.zoomIn(); setTimeout(updateStatus, 50); },
+    'zoom-out': () => { window.notepad.window.zoomOut(); setTimeout(updateStatus, 50); },
+    'minimize': () => window.notepad.window.minimize(),
+    'maximize': () => window.notepad.window.toggleMaximize(),
     'close-app': exitApp,
-    'reset-zoom': () => {
-      if (elements.fontSize) {
-        elements.fontSize.value = "12";
-        editor.runEditCommand('fontSize', "12");
-      }
-    },
+    'reset-zoom': () => { window.notepad.window.resetZoom(); setTimeout(updateStatus, 50); },
     'toggle-sidebar': () => ui.toggleSidebar(),
     'toggle-theme': () => themes.toggle(),
     about: async () => ui.showAbout(await window.notepad.app.getInfo())
   };
 
-  actions[action]?.();
+  const handler = actions[action];
+  if (!handler) return;
+  const result = handler();
+  if (result?.then) {
+    result.finally(() => {
+      syncFormattingToolbar();
+      updateStatus();
+    });
+    return;
+  }
+  syncFormattingToolbar();
   updateStatus();
 }
 
@@ -245,17 +259,17 @@ function bindAppEvents() {
 
   const onSelectionChange = debounce(() => {
     if (document.activeElement === elements.editor) {
-      $('#btn-bold')?.classList.toggle('active', document.queryCommandState('bold'));
-      $('#btn-italic')?.classList.toggle('active', document.queryCommandState('italic'));
-      $('#btn-underline')?.classList.toggle('active', document.queryCommandState('underline'));
-      $('#btn-strikethrough')?.classList.toggle('active', document.queryCommandState('strikethrough'));
-      $('#btn-align-left')?.classList.toggle('active', document.queryCommandState('justifyLeft'));
-      $('#btn-align-center')?.classList.toggle('active', document.queryCommandState('justifyCenter'));
-      $('#btn-align-right')?.classList.toggle('active', document.queryCommandState('justifyRight'));
+      const state = editor.getSelectionState();
+      $('#btn-bold')?.classList.toggle('active', state.bold);
+      $('#btn-italic')?.classList.toggle('active', state.italic);
+      $('#btn-underline')?.classList.toggle('active', state.underline);
+      $('#btn-strikethrough')?.classList.toggle('active', state.strikethrough);
+      $('#btn-align-left')?.classList.toggle('active', state.align === 'left');
+      $('#btn-align-center')?.classList.toggle('active', state.align === 'center');
+      $('#btn-align-right')?.classList.toggle('active', state.align === 'right');
 
-      // Update color pickers
-      const foreColor = document.queryCommandValue('foreColor');
-      const backColor = document.queryCommandValue('backColor');
+      // Update highlight color picker
+      const backColor = state.backColor || '#000000';
       
       const rgbToHex = (rgb) => {
         if (!rgb || rgb === 'rgba(0, 0, 0, 0)' || rgb === 'transparent') return '#000000';
@@ -265,11 +279,10 @@ function bindAppEvents() {
         return "#" + hex(match[1]) + hex(match[2]) + hex(match[3]);
       };
 
-      if ($('#font-color-picker')) $('#font-color-picker').value = rgbToHex(foreColor);
       if ($('#highlight-color-picker')) $('#highlight-color-picker').value = rgbToHex(backColor);
 
       // Update font family select
-      let currentFont = document.queryCommandValue('fontName');
+      let currentFont = state.fontFamily;
       if (currentFont && elements.fontFamily) {
         currentFont = currentFont.replace(/['"]/g, '').split(',')[0].trim();
         const options = Array.from(elements.fontFamily.options);
@@ -324,28 +337,59 @@ function bindAppEvents() {
     if (button) openRecent(button.dataset.recentPath);
   });
 
-  tabs.addEventListener('update', updateStatus);
+  elements.recoveryFiles?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-recovery-id]');
+    if (!button) return;
+    try {
+      const file = ui.getRecoverySnapshot(button.dataset.recoveryId);
+      if (!file) throw new Error('Recovery snapshot not found.');
+      const filePath = file.originalPath || file.filePath || null;
+      tabs.createTab(file.content, {
+        title: file.title,
+        filePath,
+        savedContent: file.savedContent || '',
+        isDirty: file.content !== (file.savedContent || '')
+      });
+      if (file.isPlainText) editor.isPlainTextMode = true;
+      await window.notepad.recovery.delete(file.id);
+      await refreshRecoveryFiles();
+      syncFormattingToolbar();
+    } catch (err) {
+      toasts.error('Restore failed', formatError(err));
+    }
+  });
+
+  tabs.addEventListener('update', () => {
+    syncFormattingToolbar();
+    updateStatus();
+  });
   editor.addEventListener('change', updateStatus);
   editor.addEventListener('cursor', updateStatus);
-  editor.addEventListener('zoom', updateStatus);
+  editor.addEventListener('modechange', () => {
+    syncFormattingToolbar();
+    updateStatus();
+  });
+  editor.addEventListener('format-blocked', () => {
+    toasts.info('Formatting unavailable', 'Switch to rich text mode to use formatting tools.');
+  });
   ui.addEventListener('sidebar-toggle', (e) => {
-    if (!e.detail.collapsed) refreshRecentFiles();
+    if (!e.detail.collapsed) {
+      refreshRecentFiles();
+      refreshRecoveryFiles();
+    }
   });
 
   if (elements.toggleMode) {
     elements.toggleMode.addEventListener('click', () => {
       const isPlain = editor.toggleMode();
       toasts.info(`Switched to ${isPlain ? 'Plain Text' : 'Rich Text'} mode`);
+      syncFormattingToolbar();
       updateStatus();
     });
   }
 
-  // Handle zoom event from editor to keep toolbar in sync
-  editor.addEventListener('zoom', (e) => {
-    if (elements.fontSize) {
-      elements.fontSize.value = String(e.detail.size);
-    }
-    updateStatus();
+  window.addEventListener('beforeunload', () => {
+    tabs.flushRecovery();
   });
 
 
@@ -368,6 +412,12 @@ function bindAppEvents() {
     } else if (mod && event.key.toLowerCase() === 'a') {
       event.preventDefault();
       runAction('select-all');
+    } else if (mod && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      runAction('undo');
+    } else if (mod && (event.key.toLowerCase() === 'y' || (event.shiftKey && event.key.toLowerCase() === 'z'))) {
+      event.preventDefault();
+      runAction('redo');
     } else if (mod && event.key.toLowerCase() === 'b') {
       event.preventDefault();
       runAction('bold');
@@ -380,7 +430,7 @@ function bindAppEvents() {
     } else if (mod && event.key.toLowerCase() === 'w') {
       event.preventDefault();
       closeActiveTab();
-    } else if (mod && event.key === 'Tab') {
+    } else if (mod && event.key === 'PageDown') {
       event.preventDefault();
       tabs.activateNext();
     } else if (event.key === 'F3') {
@@ -399,5 +449,7 @@ function bindAppEvents() {
 
 bindAppEvents();
 tabs.restoreSession();
+syncFormattingToolbar();
 refreshRecentFiles();
+refreshRecoveryFiles();
 updateStatus();
