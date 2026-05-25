@@ -338,6 +338,7 @@ function hardenWebContents(win) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
+    icon: path.join(__dirname, "src/assets/logo.ico"),
     width: 1240,
     height: 820,
     minWidth: 860,

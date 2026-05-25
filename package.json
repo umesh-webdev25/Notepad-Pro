@@ -12,14 +12,14 @@
   },
   "build": {
     "appId": "com.electron.notepad",
-    "productName": "Notepad Pro",
+    "productName": "Notebook Pro",
     "asar": true,
     "directories": {
       "output": "dist"
     },
     "win": {
       "target": "portable",
-      "icon": "icon.png"
+      "icon": "src/assets/logo.ico"
     },
     "files": [
       "main.js",
