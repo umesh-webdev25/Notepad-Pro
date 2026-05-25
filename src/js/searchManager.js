@@ -12,12 +12,13 @@ export class SearchManager {
     this.matches = [];
     this.currentIndex = -1;
     this.overlayContainer = null;
+    this.searchSavedRange = null;
     this.scheduleHighlight = debounce(() => this.renderHighlights(), 16);
     this.bind();
   }
 
   bind() {
-    this.input.addEventListener('input', () => this.refresh());
+    this.input.addEventListener('input', () => this.refresh(false));
     this.input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -35,6 +36,10 @@ export class SearchManager {
   }
 
   open() {
+    const sel = window.getSelection();
+    if (sel.rangeCount > 0) {
+      this.searchSavedRange = sel.getRangeAt(0).cloneRange();
+    }
     this.findBar.hidden = false;
     this.input.focus();
     this.input.select();
@@ -49,6 +54,16 @@ export class SearchManager {
     this.clearHighlights();
     this.updateCount();
     this.editorManager.focus();
+    if (this.searchSavedRange) {
+      try {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(this.searchSavedRange);
+        this.editorManager.saveSelection();
+      } catch {
+      }
+      this.searchSavedRange = null;
+    }
   }
 
   refresh(selectFirst = true) {

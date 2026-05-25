@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 
-export const PLAIN_EXTENSIONS = new Set(['txt', 'md', 'log', 'csv']);
+export const PLAIN_EXTENSIONS = new Set(['md', 'log', 'csv']);
 
 const ALLOWED_TAGS = [
   'b', 'i', 'u', 's', 'strike', 'strong', 'em', 'br', 'p', 'div', 'span', 'font'

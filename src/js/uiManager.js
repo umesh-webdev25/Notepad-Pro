@@ -10,6 +10,13 @@ export class UIManager extends EventTarget {
   }
 
   bind() {
+    document.addEventListener('mousedown', (event) => {
+      const actionTarget = event.target.closest('[data-action]');
+      if (actionTarget && actionTarget.tagName !== 'INPUT' && actionTarget.tagName !== 'SELECT') {
+        event.preventDefault();
+      }
+    });
+
     document.addEventListener('click', (event) => {
       const actionTarget = event.target.closest('[data-action]');
       if (actionTarget) {

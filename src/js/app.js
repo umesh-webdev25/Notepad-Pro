@@ -113,24 +113,25 @@ async function saveActive(saveAs = false) {
   if (!tab) return false;
 
   try {
-    const extFromPath = tab.filePath?.split('.').pop()?.toLowerCase();
-    const isPlainText = editor.isPlainTextMode || extFromPath === 'txt' || extFromPath === 'md';
-    tab.content = editor.getValue(isPlainText);
+    let currentFilePath = tab.filePath;
+    
+    if (saveAs || !currentFilePath) {
+      let suggested = (tab.title === 'Untitled' || tab.title === 'Untitled.txt') ? 'Untitled.txt' : tab.title;
+      if (!suggested.includes('.')) suggested += '.txt';
 
-    if (saveAs || !tab.filePath) {
-      let suggested = tab.title === 'Untitled' ? '' : tab.title;
-      if (!suggested || suggested === 'Untitled') {
-        const firstLine = editor.getPlainText().split('\n')[0].trim();
-        if (firstLine) suggested = firstLine.slice(0, 35).replace(/[<>:"/\\|?*]/g, '').trim();
-      }
-      if (!suggested) suggested = 'Untitled';
-      if (!suggested.includes('.')) suggested += isPlainText ? '.txt' : '.html';
-
-      const pick = await fileManager.save({ ...tab, filePath: suggested }, true);
+      const isSuggestedPlain = editor.isPlainTextMode || suggested.endsWith('.md');
+      
+      const pick = await fileManager.save({ ...tab, filePath: suggested, content: editor.getValue(isSuggestedPlain) }, true);
       if (!pick || pick.canceled) return false;
+      
+      currentFilePath = pick.filePath;
       tab.filePath = pick.filePath;
       tab.title = pick.name;
     }
+
+    const extFromPath = currentFilePath?.split('.').pop()?.toLowerCase();
+    const isPlainText = editor.isPlainTextMode || extFromPath === 'md';
+    tab.content = editor.getValue(isPlainText);
 
     const result = await fileManager.save(tab, false);
     if (!result) return false;
@@ -317,11 +318,17 @@ function bindAppEvents() {
   document.addEventListener('selectionchange', onSelectionChange);
 
   $('#font-color-picker')?.addEventListener('input', (e) => {
-    editor.runEditCommand('foreColor', e.target.value);
+    if (editor.isPlainTextMode) return;
+    editor.focus();
+    editor.restoreSelection();
+    document.execCommand('foreColor', false, e.target.value);
   });
 
   $('#highlight-color-picker')?.addEventListener('input', (e) => {
-    editor.runEditCommand('backColor', e.target.value);
+    if (editor.isPlainTextMode) return;
+    editor.focus();
+    editor.restoreSelection();
+    document.execCommand('hiliteColor', false, e.target.value);
   });
 
   elements.fontFamily?.addEventListener('change', (e) => {

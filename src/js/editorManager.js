@@ -4,7 +4,7 @@ import { isPlainExtension, sanitizePlainText, sanitizeRichHtml } from './sanitiz
 const RICH_COMMANDS = new Set([
   'bold', 'italic', 'underline', 'strikethrough',
   'justifyLeft', 'justifyCenter', 'justifyRight',
-  'backColor', 'foreColor', 'fontName', 'fontSize', 'clear-format'
+  'backColor', 'foreColor', 'hiliteColor', 'fontName', 'fontSize', 'clear-format'
 ]);
 
 const TAG_BY_COMMAND = {
@@ -25,7 +25,7 @@ export class EditorManager extends EventTarget {
     super();
     this.editor = container;
     this.isPlainTextMode = false;
-    this.lastRange = null;
+    this.savedRange = null;
     this.history = [];
     this.historyIndex = -1;
     this.maxHistory = 100;
@@ -42,26 +42,48 @@ export class EditorManager extends EventTarget {
     this.bind();
   }
 
+  saveSelection() {
+    try {
+      const sel = window.getSelection();
+      if (sel.rangeCount > 0 && this.editor.contains(sel.anchorNode)) {
+        this.savedRange = sel.getRangeAt(0).cloneRange();
+      }
+    } catch {
+    }
+  }
+
+  restoreSelection() {
+    try {
+      if (this.savedRange) {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(this.savedRange);
+      }
+    } catch {
+      this.savedRange = null;
+    }
+  }
+
   bind() {
+    document.addEventListener('mousedown', () => this.saveSelection(), true);
+
     this.editor.addEventListener('input', () => {
       this.pushHistory();
       this.dispatchEvent(new CustomEvent('change', {
         detail: { content: this.getValue(this.isPlainTextMode) }
       }));
       this.emitCursor();
+      this.saveSelection();
     });
 
-    const saveSelection = () => {
-      const sel = window.getSelection();
-      if (sel.rangeCount > 0 && this.editor.contains(sel.anchorNode)) {
-        this.lastRange = sel.getRangeAt(0).cloneRange();
-      }
-    };
+    const saveSelection = () => this.saveSelection();
 
     this.editor.addEventListener('blur', saveSelection);
+    this.editor.addEventListener('mouseup', saveSelection);
+    this.editor.addEventListener('keyup', saveSelection);
     document.addEventListener('selectionchange', () => {
       if (document.activeElement === this.editor) {
-        saveSelection();
+        this.saveSelection();
         this.emitCursor();
       }
     });
@@ -103,13 +125,6 @@ export class EditorManager extends EventTarget {
     this.setValue(content, { mode, bypassHistory: true });
   }
 
-  restoreSelection() {
-    if (!this.lastRange) return;
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(this.lastRange);
-  }
-
   focus() {
     this.editor.focus();
   }
@@ -119,7 +134,7 @@ export class EditorManager extends EventTarget {
   }
 
   setValue(content, metadata = {}) {
-    this.lastRange = null;
+    this.savedRange = null;
     const extPlain = isPlainExtension(metadata.filePath || metadata.title || '');
     this.isPlainTextMode = metadata.mode === 'plain' || metadata.mode === 'rich'
       ? metadata.mode === 'plain'
@@ -159,11 +174,11 @@ export class EditorManager extends EventTarget {
       return;
     }
 
-    this.restoreSelection();
     this.focus();
+    this.restoreSelection();
 
-    if (command === 'undo') return this.undo();
-    if (command === 'redo') return this.redo();
+    if (command === 'undo') { this.undo(); this.focus(); this.saveSelection(); return; }
+    if (command === 'redo') { this.redo(); this.focus(); this.saveSelection(); return; }
 
     if (command === 'cut' || command === 'copy' || command === 'paste') {
       this.runClipboard(command);
@@ -176,6 +191,7 @@ export class EditorManager extends EventTarget {
       range.selectNodeContents(this.editor);
       sel.removeAllRanges();
       sel.addRange(range);
+      this.saveSelection();
       return;
     }
 
@@ -266,6 +282,11 @@ export class EditorManager extends EventTarget {
       const parent = wrapper.parentNode;
       while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
       parent.removeChild(wrapper);
+      const sel = window.getSelection();
+      const newRange = document.createRange();
+      newRange.selectNodeContents(parent);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
       return;
     }
 
@@ -380,7 +401,6 @@ export class EditorManager extends EventTarget {
         line = lines.length;
         column = lines[lines.length - 1].length + 1;
       } catch {
-        // ignore range errors
       }
     }
 
