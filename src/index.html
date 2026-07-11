@@ -37,9 +37,6 @@
       </div>
 
       <div class="title-right">
-        <button id="toggle-sidebar-top" class="icon-btn title-action" type="button" data-action="toggle-sidebar" aria-label="Toggle sidebar" title="Toggle sidebar">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16" /></svg>
-        </button>
         <div class="window-controls" aria-label="Window controls">
           <button id="minimize-btn" type="button" data-action="minimize" aria-label="Minimize" title="Minimize">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" /></svg>
@@ -103,6 +100,9 @@
 
     <div id="toolbar" class="toolbar" aria-label="Editor toolbar">
       <div class="toolbar-group">
+        <button type="button" class="toolbar-btn" data-action="toggle-sidebar" aria-label="Toggle sidebar" title="Toggle sidebar">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 5h16M4 12h16M4 19h16" /></svg>
+        </button>
         <button type="button" class="toolbar-btn" data-action="save" aria-label="Save" title="Save Ctrl+S">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h12l2 2v12H5zM8 5v6h8V5M8 19v-5h8v5" /></svg>
         </button>
